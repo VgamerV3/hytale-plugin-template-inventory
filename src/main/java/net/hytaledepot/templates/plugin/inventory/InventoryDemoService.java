@@ -2,30 +2,24 @@ package net.hytaledepot.templates.plugin.inventory;
 
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class InventoryDemoService {
   private final Map<String, AtomicLong> actionCounters = new ConcurrentHashMap<>();
   private final Map<String, String> lastActionBySender = new ConcurrentHashMap<>();
-  private final Map<String, String> runtimeValues = new ConcurrentHashMap<>();
-  private final Map<String, String> domainState = new ConcurrentHashMap<>();
-  private final Map<String, AtomicLong> numericState = new ConcurrentHashMap<>();
-
+  private final Map<String, Map<String, Integer>> stashes = new ConcurrentHashMap<>();
   private volatile Path dataDirectory;
 
   public void initialize(Path dataDirectory) {
     this.dataDirectory = dataDirectory;
-    runtimeValues.put("category", "Inventory");
-    runtimeValues.put("defaultAction", "stash-demo");
-    runtimeValues.put("initialized", "true");
+    stashes.clear();
   }
 
   public void onHeartbeat(long tick) {
     actionCounters.computeIfAbsent("heartbeat", key -> new AtomicLong()).incrementAndGet();
-    if (tick % 120 == 0) {
-      runtimeValues.put("lastHeartbeat", String.valueOf(tick));
-    }
+
   }
 
   public void recordExternalEvent(String key) {
@@ -41,7 +35,6 @@ public final class InventoryDemoService {
 
     if ("toggle".equals(normalizedAction)) {
       boolean enabled = state.toggleDemoFlag();
-      runtimeValues.put("demoFlag", String.valueOf(enabled));
       return "[Inventory] demoFlag=" + enabled + ", heartbeatTicks=" + heartbeatTicks;
     }
 
@@ -71,52 +64,44 @@ public final class InventoryDemoService {
 
   public String diagnostics() {
     String directory = dataDirectory == null ? "unset" : dataDirectory.toString();
-    return "ops="
-        + operationCount()
-        + ", trackedActions="
-        + actionCounters.size()
-        + ", domainEntries="
-        + domainState.size()
-        + ", numericEntries="
-        + numericState.size()
-        + ", dataDirectory="
-        + directory;
+    int totalStacks = stashes.values().stream().mapToInt(Map::size).sum();
+    return "ops=" + operationCount()
+        + ", playersWithStash=" + stashes.size()
+        + ", totalStacks=" + totalStacks
+        + ", dataDirectory=" + directory;
   }
 
   public void shutdown() {
-    runtimeValues.put("initialized", "false");
+    stashes.clear();
   }
 
   private String handleDomainAction(String sender, String action, long heartbeatTicks) {
+    Map<String, Integer> stash = stashOf(sender);
     if ("sample".equals(action) || "stash-demo".equals(action)) {
-      long count = incrementNumber("stash:" + sender.toLowerCase() + ":emerald", 1);
-      return "stash emerald=" + count;
+      stash.merge("starter_wood_sword", 1, Integer::sum);
+      stash.merge("healing_potion", 2, Integer::sum);
+      return "stash updated " + new TreeMap<>(stash);
     }
     if ("consume-demo".equals(action)) {
-      String key = "stash:" + sender.toLowerCase() + ":emerald";
-      long current = number(key);
+      int current = stash.getOrDefault("healing_potion", 0);
       if (current <= 0) {
-        return "stash empty";
+        return "no healing_potion available";
       }
-      setNumber(key, current - 1);
-      return "stash emerald=" + number(key);
+      if (current == 1) {
+        stash.remove("healing_potion");
+      } else {
+        stash.put("healing_potion", current - 1);
+      }
+      return "consumed healing_potion, stash=" + new TreeMap<>(stash);
     }
     if ("list-stash".equals(action)) {
-      return "stash emerald=" + number("stash:" + sender.toLowerCase() + ":emerald");
+      return "stash=" + new TreeMap<>(stash);
     }
     return null;
   }
 
-  private long incrementNumber(String key, long delta) {
-    return numericState.computeIfAbsent(key, item -> new AtomicLong()).addAndGet(delta);
-  }
-
-  private long number(String key) {
-    return numericState.computeIfAbsent(key, item -> new AtomicLong()).get();
-  }
-
-  private void setNumber(String key, long value) {
-    numericState.computeIfAbsent(key, item -> new AtomicLong()).set(value);
+  private Map<String, Integer> stashOf(String sender) {
+    return stashes.computeIfAbsent(String.valueOf(sender).toLowerCase(), key -> new ConcurrentHashMap<>());
   }
 
   private static String normalizeAction(String action) {
